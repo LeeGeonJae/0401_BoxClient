@@ -4,59 +4,81 @@
 #include "MSGPacket.h"
 #include <WinSock2.h>
 #include <process.h>
+#include <map>
+#include "PlayerData.h"
+#include <time.h>
+#include <vector>
+#include <iostream>
 
 #pragma comment(lib, "ws2_32.lib")
+
+using namespace std;
 
 unsigned WINAPI RecvThread(void* args);
 
 HANDLE RecvThreadHandle;
 
+vector<PlayerData> PlayerList;
+
+CRITICAL_SECTION ClientCriticalSection;
+
 int SDL_main(int argc, char* argv[])
 {
-	WSAData wsaData;
+	srand((unsigned int)time(nullptr));
 
+	InitializeCriticalSection(&ClientCriticalSection);
+
+	PlayerData MyPlayerData;
+
+	MyPlayerData.R = rand() % 255; // 0 ~ 255
+	MyPlayerData.G = rand() % 255;
+	MyPlayerData.B = rand() % 255;
+	MyPlayerData.X = rand() % 300 + 300; //300 ~ 600
+	MyPlayerData.Y = rand() % 200 + 200; //200 ~ 400
+
+	EnterCriticalSection(&ClientCriticalSection);
+	PlayerList.push_back(MyPlayerData);
+	LeaveCriticalSection(&ClientCriticalSection);
+
+	WSAData wsaData;
 	WSAStartup(MAKEWORD(2, 2), &wsaData);
 
 	SOCKET ServerSocket;
 	ServerSocket = socket(AF_INET, SOCK_STREAM, 0);
 
 	SOCKADDR_IN ServerAddr;
-	memset(&ServerAddr, 0, sizeof(SOCKADDR_IN));
+	memset(&ServerAddr, 0, sizeof(SOCKADDR));
 	ServerAddr.sin_family = PF_INET;
 	ServerAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 	ServerAddr.sin_port = htons(3000);
 
-	char SenData[1024] = { 0, };
+	char SendData[1024] = { 0, };
 
-	connect(ServerSocket, (SOCKADDR*)(&ServerAddr), sizeof(ServerAddr));
+	connect(ServerSocket, (SOCKADDR*)&ServerAddr, sizeof(ServerAddr));
 
 	RecvThreadHandle = (HANDLE)_beginthreadex(0, 0, RecvThread, (void*)&ServerSocket, 0, 0);
 
-	//code  length  r   g   b
-	//[1]     [1]  [1] [1] [1]
-	SenData[0] = (UINT8)MSGPacket::Login;
-	SenData[1] = (UINT8)3;
-	SenData[2] = (UINT8)0xff;
-	SenData[3] = (UINT8)0x00;
-	SenData[4] = (UINT8)0x00;
-	int sendLength = send(ServerSocket, SenData, 5, 0);
+	//Login
+	SendData[0] = (UINT8)MSGPacket::Login;
+	SendData[1] = (UINT8)15;
+	PlayerList[0].MakePacket(&SendData[2]);
 
-	SDL_Log("send Length %d", sendLength);
+	SDL_Log("%d\n", MyPlayerData.R);
+	SDL_Log("%d\n", MyPlayerData.G);
+	SDL_Log("%d\n", MyPlayerData.B);
 
-	// 서버 접속
-	// 사각형 그려서 움직이기
-	
+
+	int sendLength = send(ServerSocket, SendData, 15 + 2, 0);
+
 	bool bIsRunning = true;
-	int PlayerX = 100;
-	int PlayerY = 100;
 
 	SDL_Init(SDL_INIT_EVERYTHING);
 
 	SDL_Window* MyWindow = SDL_CreateWindow("Client", 100, 100, 800, 600, SDL_WINDOW_OPENGL);
-	SDL_Renderer* MyRenderer = SDL_CreateRenderer(MyWindow, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC | SDL_RENDERER_TARGETTEXTURE);
+	SDL_Renderer* MyRenderer = SDL_CreateRenderer(MyWindow, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
+		| SDL_RENDERER_TARGETTEXTURE);
 	SDL_Event MyEvent;
 
-	SDL_Rect MyRect = { PlayerX, PlayerY, 30, 30 };
 
 	while (bIsRunning)
 	{
@@ -74,16 +96,16 @@ int SDL_main(int argc, char* argv[])
 				bIsRunning = false;
 				break;
 			case SDLK_LEFT:
-				PlayerX--;
+				PlayerList[0].X--;
 				break;
 			case SDLK_RIGHT:
-				PlayerX++;
+				PlayerList[0].X++;
 				break;
 			case SDLK_UP:
-				PlayerY--;
+				PlayerList[0].Y--;
 				break;
 			case SDLK_DOWN:
-				PlayerY++;
+				PlayerList[0].Y++;
 				break;
 			}
 		}
@@ -91,11 +113,14 @@ int SDL_main(int argc, char* argv[])
 		SDL_SetRenderDrawColor(MyRenderer, 0xff, 0xff, 0xff, 0xff);
 		SDL_RenderClear(MyRenderer);
 
-		MyRect.x = PlayerX;
-		MyRect.y = PlayerY;
+		for (int i = 0; i < (int)PlayerList.size(); ++i)
+		{
+			SDL_Rect MyRect = { (int)PlayerList[i].X, (int)PlayerList[i].Y, 30, 30 };
 
-		SDL_SetRenderDrawColor(MyRenderer, 0xff, 0x00, 0x00, 0xff);
-		SDL_RenderFillRect(MyRenderer, &MyRect);
+			SDL_SetRenderDrawColor(MyRenderer, PlayerList[i].R, PlayerList[i].G, PlayerList[i].B, 0xff);
+			SDL_RenderFillRect(MyRenderer, &MyRect);
+		}
+
 
 		SDL_RenderPresent(MyRenderer);
 	}
@@ -104,8 +129,9 @@ int SDL_main(int argc, char* argv[])
 	SDL_DestroyWindow(MyWindow);
 	SDL_Quit();
 
-
 	closesocket(ServerSocket);
+
+	DeleteCriticalSection(&ClientCriticalSection);
 
 	WSACleanup();
 
@@ -129,16 +155,42 @@ unsigned __stdcall RecvThread(void* args)
 		{
 			if ((UINT8)Header[0] == (UINT8)MSGPacket::LoginAck)
 			{
-				char Data[4] = { 0, };
+				char Data[15] = { 0 };
 				int recvLength = recv(ServerSocket, Data, Header[1], 0);
 
-				unsigned int Number;
-				memcpy(&Number, Data, 4);
+				PlayerList[0].MakeData(Data);
+			}
+			else if ((UINT8)Header[0] == (UINT8)MSGPacket::MakePlayer)
+			{
+				char Data[15] = { 0 };
+				int recvLength = recv(ServerSocket, Data, Header[1], 0);
 
-				SDL_Log("LoginAck : %d, %u ", recvLength, Number);
+				PlayerData NewPlayerData;
+				NewPlayerData.MakeData(Data);
+
+				bool NewPlayerCheck = true;
+				for (int i = 0; i < (int)PlayerList.size(); ++i)
+				{
+					if (PlayerList[i].ClientSocket == NewPlayerData.ClientSocket)
+					{
+						NewPlayerCheck = false;
+						break;
+					}
+				}
+
+				if (NewPlayerCheck)
+				{
+					PlayerList.push_back(NewPlayerData);
+				}
+
+
+
+				SDL_Log("MakePlayer\n");
 			}
 		}
 	}
+
+
 
 	return 0;
 }
